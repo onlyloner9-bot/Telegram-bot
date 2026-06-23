@@ -1,149 +1,122 @@
+const TelegramBot = require("node-telegram-bot-api");
 
-});
+// ================= BOT TOKEN =================
+// 👇 PUT YOUR TOKEN HERE
+const TOKEN = "YOUR_BOT_TOKEN_HERE";
 
-// ================= TOGGLE SYSTEM =================
-function toggle(cmd, key, label) {
-  bot.command(cmd, async (ctx) => {
-    if (!(await isAdmin(ctx))) return ctx.reply("❌ Admin only");
+const bot = new TelegramBot(TOKEN, { polling: true });
 
-    const arg = ctx.message.text.split(" ")[1];
-    settings[key] = arg === "on";
+// ================= SETTINGS =================
+const badWords = ["badword1", "badword2", "fuck", "shit"];
 
-    ctx.reply(`${label}: ${settings[key] ? "ON" : "OFF"}`);
-  });
+const spamMap = new Map();
+const warnMap = new Map();
+
+const MAX_WARN = 3;
+const SPAM_LIMIT = 5;
+const TIME_WINDOW = 5000;
+
+// ================= CHECK ADMIN =================
+async function isAdmin(chatId, userId) {
+  try {
+    const res = await bot.getChatMember(chatId, userId);
+    return ["administrator", "creator"].includes(res.status);
+  } catch {
+    return false;
+  }
 }
 
-toggle("antilink", "antilink", "🔗 Anti-link");
-toggle("antibadword", "antibadword", "🚫 Anti-badword");
-toggle("antispam", "antispam", "⚡ Anti-spam");
-toggle("antiforward", "antiforward", "📩 Anti-forward");
+// ================= DETECTORS =================
+function hasLink(text = "") {
+  return /(https?:\/\/|t\.me\/|www\.)/i.test(text);
+}
 
-// ================= BAN =================
-bot.command("ban", async (ctx) => {
-  if (!(await isAdmin(ctx))) return;
+function hasBadWord(text = "") {
+  return badWords.some(w => text.toLowerCase().includes(w));
+}
 
-  if (!ctx.message?.reply_to_message)
-    return ctx.reply("Reply to user");
+function hasMassMention(text = "") {
+  return text.includes("@all") || (text.match(/@\w+/g) || []).length > 5;
+}
 
-  try {
-    const id = ctx.message.reply_to_message.from.id;
-    await ctx.banChatMember(id);
-    ctx.reply("🔨 Banned");
-  } catch {}
-});
+// ================= MESSAGE HANDLER =================
+bot.on("message", async (msg) => {
+  if (!msg.text) return;
 
-// ================= KICK =================
-bot.command("kick", async (ctx) => {
-  if (!(await isAdmin(ctx))) return;
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const text = msg.text;
 
-  if (!ctx.message?.reply_to_message)
-    return ctx.reply("Reply to user");
+  if (msg.from.is_bot) return;
 
-  try {
-    const id = ctx.message.reply_to_message.from.id;
-    await ctx.banChatMember(id);
-    await ctx.unbanChatMember(id);
-    ctx.reply("👢 Kicked");
-  } catch {}
-});
+  const admin = await isAdmin(chatId, userId);
+  if (admin) return; // admins bypass
 
-// ================= MUTE =================
-bot.command("mute", async (ctx) => {
-  if (!(await isAdmin(ctx))) return;
+  // ================= ANTI LINK =================
+  if (hasLink(text)) {
+    bot.deleteMessage(chatId, msg.message_id);
+    return warn(chatId, userId, "Links are not allowed");
+  }
 
-  if (!ctx.message?.reply_to_message)
-    return ctx.reply("Reply to user");
+  // ================= ANTI BAD WORD =================
+  if (hasBadWord(text)) {
+    bot.deleteMessage(chatId, msg.message_id);
+    return warn(chatId, userId, "Bad words detected");
+  }
 
-  try {
-    const id = ctx.message.reply_to_message.from.id;
+  // ================= ANTI MASS MENTION =================
+  if (hasMassMention(text)) {
+    bot.deleteMessage(chatId, msg.message_id);
+    return warn(chatId, userId, "Mass mention detected");
+  }
 
-    await ctx.restrictChatMember(id, {
-      permissions: { can_send_messages: false },
-    });
+  // ================= ANTI SPAM =================
+  const now = Date.now();
 
-    ctx.reply("🔇 Muted");
-  } catch {}
-});
+  if (!spamMap.has(userId)) spamMap.set(userId, []);
 
-// ================= WARN SYSTEM =================
-bot.command("warn", async (ctx) => {
-  if (!(await isAdmin(ctx))) return;
+  const times = spamMap.get(userId);
+  times.push(now);
 
-  if (!ctx.message?.reply_to_message)
-    return ctx.reply("Reply to user");
+  const recent = times.filter(t => now - t < TIME_WINDOW);
+  spamMap.set(userId, recent);
 
-  const id = ctx.message.reply_to_message.from.id;
-
-  warns[id] = (warns[id] || 0) + 1;
-
-  ctx.reply(`⚠️ Warn: ${warns[id]}/3`);
-
-  if (warns[id] >= 3) {
-    try {
-      await ctx.banChatMember(id);
-      ctx.reply("🔨 Auto-banned (3 warns)");
-    } catch {}
+  if (recent.length > SPAM_LIMIT) {
+    bot.deleteMessage(chatId, msg.message_id);
+    return warn(chatId, userId, "Spam detected");
   }
 });
 
-// ================= FILTER SYSTEM =================
-bot.on("message", async (ctx) => {
-  const text = (ctx.message?.text || "").toLowerCase();
-  const userId = ctx.from.id;
+// ================= WARNING SYSTEM =================
+async function warn(chatId, userId, reason) {
+  let count = warnMap.get(userId) || 0;
+  count++;
+  warnMap.set(userId, count);
 
-  // ===== ANTI LINK =====
-  if (settings.antilink && text) {
-    if (text.includes("http") || text.includes("t.me")) {
-      if (!(await isAdmin(ctx))) {
-        await safeDelete(ctx);
-        return ctx.reply("🚫 Links not allowed");
-      }
-    }
+  await bot.sendMessage(chatId, `⚠️ Warning ${count}/${MAX_WARN}\nReason: ${reason}`);
+
+  if (count >= MAX_WARN) {
+    await bot.banChatMember(chatId, userId);
+    warnMap.delete(userId);
+    bot.sendMessage(chatId, "⛔ User banned.");
   }
+}
 
-  // ===== ANTI BADWORD =====
-  if (settings.antibadword && text) {
-    for (let w of badWords) {
-      if (text.includes(w)) {
-        if (!(await isAdmin(ctx))) {
-          await safeDelete(ctx);
-          return ctx.reply("🚫 Bad words not allowed");
-        }
-      }
-    }
-  }
-
-  // ===== ANTI SPAM (IMPROVED) =====
-  if (settings.antispam) {
-    if (!spam[userId]) spam[userId] = [];
-
-    const now = Date.now();
-    spam[userId].push(now);
-
-    spam[userId] = spam[userId].filter(t => now - t < 5000);
-
-    if (spam[userId].length > 6) {
-      await safeDelete(ctx);
-      return ctx.reply("⚠️ Slow down!");
-    }
-  }
-
-  // ===== ANTI FORWARD =====
-  if (settings.antiforward) {
-    if (ctx.message?.forward_date) {
-      if (!(await isAdmin(ctx))) {
-        await safeDelete(ctx);
-        return ctx.reply("🚫 Forwarding blocked");
-      }
-    }
-  }
+// ================= COMMANDS =================
+bot.onText(/\/start/, (msg) => {
+  bot.sendMessage(msg.chat.id, "🤖 Group Management Bot is online!");
 });
 
-// ================= ERROR HANDLER =================
-bot.catch((err) => {
-  console.log("BOT ERROR:", err);
-});
+bot.onText(/\/help/, (msg) => {
+  bot.sendMessage(msg.chat.id, `
+📌 Commands:
+/start - Start bot
+/help - Help
 
-// ================= START =================
-bot.launch();
-console.log("🤖 Group Manager v2 Running...");
+🛡 Features:
+- Anti Link
+- Anti Spam
+- Anti Badword
+- Anti Mass Mention
+`);
+});
