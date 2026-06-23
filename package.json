@@ -1,11 +1,11 @@
 {
-  "name": "group-manager-v2",
-  "version": "2.0.0",
+  "name": "telegram-group-bot",
+  "version": "1.0.0",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
-  }
-}ependencies": {
+  },
+  "dependencies": {
     "node-telegram-bot-api": "^0.66.0"
   }
 }
